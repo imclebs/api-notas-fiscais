@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-pdfplumber
+pypdf
 google-genai
 python-multipart
