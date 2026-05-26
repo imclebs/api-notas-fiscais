@@ -4,14 +4,13 @@ import json
 import base64
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pdfplumber
+import pypdf
 from google import genai
 from google.genai import types
 
-# Inicializa a aplicação FastAPI
-app = FastAPI(title="API Extração de Notas Fiscais - Gemini Free")
+app = FastAPI(title="API Extração de Notas Fiscais - Gemini Ultra-Leve")
 
-# Inicializa o cliente do Gemini buscando a chave de forma segura no Render
+# Inicializa o cliente do Gemini
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 class Payload(BaseModel):
@@ -19,49 +18,34 @@ class Payload(BaseModel):
 
 @app.get("/")
 def health_check():
-    """Rota raiz para validar se a API está online no Render"""
     return {"status": "online", "servico": "API Extração de Notas Fiscais (Gemini)"}
 
 @app.post("/extrair-nf")
 def extrair_nf(payload: Payload):
     try:
-        # 1. VALIDAÇÃO E DECODIFICAÇÃO DO BASE64 enviado pelo Power Automate
+        # 1. DECODIFICAÇÃO DO BASE64
         try:
             pdf_bytes = base64.b64decode(payload.pdf_base64)
         except Exception as e:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Erro ao decodificar string Base64: {str(e)}"
-            )
+            raise HTTPException(status_code=400, detail=f"Erro Base64: {str(e)}")
             
-        # 2. EXTRAÇÃO DE TEXTO DO PDF UTILIZANDO PDFPLUMBER
+        # 2. EXTRAÇÃO DE TEXTO DO PDF (Usando pypdf para economizar RAM)
         texto = ""
         try:
-            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                for pagina in pdf.pages:
-                    texto += pagina.extract_text() or ""
+            feixe_bytes = io.BytesIO(pdf_bytes)
+            leitor = pypdf.PdfReader(feixe_bytes)
+            for pagina in leitor.pages:
+                texto += pagina.extract_text() or ""
         except Exception as e:
-            raise HTTPException(
-                status_code=422, 
-                detail=f"Erro ao abrir ou processar a estrutura do PDF: {str(e)}"
-            )
+            raise HTTPException(status_code=422, detail=f"Erro ao ler PDF com pypdf: {str(e)}")
 
-        # Valida se o arquivo retornou algum caractere de texto legível
         if not texto.strip():
-            raise HTTPException(
-                status_code=422, 
-                detail="O PDF foi aberto, mas nenhum texto foi extraído (provavelmente o arquivo é uma imagem escaneada)."
-            )
+            raise HTTPException(status_code=422, detail="O PDF está vazio ou é uma imagem escaneada.")
 
-        # 3. CHAMADA E DEFINIÇÃO DO PROMPT PARA O GEMINI 1.5 FLASH (GRATUITO)
+        # 3. CHAMADA PARA O GEMINI 1.5 FLASH
         try:
-            prompt = f"""Extraia as informações estruturadas desta nota fiscal e retorne estritamente um objeto JSON.
-            
-            Texto bruto extraído da nota fiscal:
-            {texto}"""
+            prompt = f"Extraia as informações estruturadas desta nota fiscal e retorne estritamente um objeto JSON.\nTexto:\n{texto}"
 
-            # O recurso de Schema força o Gemini a responder estritamente no formato esperado,
-            # eliminando qualquer chance de quebra por caracteres adicionais ou markdown.
             response = client.models.generate_content(
                 model='gemini-1.5-flash',
                 contents=prompt,
@@ -80,26 +64,16 @@ def extrair_nf(payload: Payload):
                 ),
             )
         except Exception as e:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Falha de comunicação ou autenticação na API do Gemini: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Falha na API do Gemini: {str(e)}")
 
-        # 4. LEITURA E CONVERSÃO DA RESPOSTA EM JSON VÁLIDO PARA O POWER AUTOMATE
+        # 4. CONVERSÃO DO RETORNO
         try:
-            texto_resposta = response.text.strip()
-            resultado = json.loads(texto_resposta)
+            resultado = json.loads(response.text.strip())
             return resultado
         except Exception as e:
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Erro ao converter a resposta da IA em JSON válido: {str(e)}. Resposta bruta: {response.text}"
-            )
+            raise HTTPException(status_code=500, detail=f"Erro JSON: {str(e)}")
 
     except HTTPException as http_err:
         raise http_err
     except Exception as general_err:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Erro interno não mapeado no script Python: {str(general_err)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Erro interno inesperado: {str(general_err)}")
