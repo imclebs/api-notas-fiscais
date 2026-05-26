@@ -4,13 +4,14 @@ import json
 import base64
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import pypdf
+import pypdf  # Importação padrão e segura para o interpretador
 from google import genai
 from google.genai import types
 
+# Inicializa a aplicação FastAPI
 app = FastAPI(title="API Extração de Notas Fiscais - Gemini Ultra-Leve")
 
-# Inicializa o cliente do Gemini
+# Inicializa o cliente do Gemini buscando a chave do Render
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
 class Payload(BaseModel):
@@ -18,6 +19,7 @@ class Payload(BaseModel):
 
 @app.get("/")
 def health_check():
+    """Rota raiz para o Render validar que o serviço está online"""
     return {"status": "online", "servico": "API Extração de Notas Fiscais (Gemini)"}
 
 @app.post("/extrair-nf")
@@ -29,7 +31,7 @@ def extrair_nf(payload: Payload):
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Erro Base64: {str(e)}")
             
-        # 2. EXTRAÇÃO DE TEXTO DO PDF (Usando pypdf para economizar RAM)
+        # 2. EXTRAÇÃO DE TEXTO DO PDF (Usando pypdf de forma limpa)
         texto = ""
         try:
             feixe_bytes = io.BytesIO(pdf_bytes)
