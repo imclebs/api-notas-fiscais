@@ -136,7 +136,7 @@ def extrair_nf(payload: Payload):
             raise HTTPException(status_code=422, detail=f"Falha ao ler a estrutura do arquivo XML: {str(e)}")
 
     # -------------------------------------------------------------------------
-    # FLUXO TEXTUAL: EXTRAÇÃO DE TEXTO PARA DOCX OU PDF
+    # FLUXO TEXTUAL: EXTRAÇÃO DE TEXTO PARA DOCX OU PDF (COM SUPORTE A TABELAS)
     # -------------------------------------------------------------------------
     texto_extraido = ""
     
@@ -144,8 +144,20 @@ def extrair_nf(payload: Payload):
         print("[PROCESSAMENTO] Extraindo texto de documento Word (.docx)...")
         try:
             doc = Document(io.BytesIO(conteudo_bytes))
+            
+            # 1. Extrai texto dos parágrafos comuns
             for paragrafo in doc.paragraphs:
-                texto_extraido += paragrafo.text + "\n"
+                if paragrafo.text.strip():
+                    texto_extraido += paragrafo.text + "\n"
+            
+            # 2. Extrai texto de dentro de tabelas (onde costumam ficar os cabeçalhos/layouts estruturados)
+            for tabela in doc.tables:
+                for linha in tabela.rows:
+                    texto_linha = [celula.text.strip() for celula in linha.cells if celula.text.strip()]
+                    if texto_linha:
+                        # O dict.fromkeys remove duplicatas mantendo a ordem caso existam células mescladas
+                        texto_extraido += " | ".join(list(dict.fromkeys(texto_linha))) + "\n"
+                        
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Erro ao ler arquivo Word: {str(e)}")
 
@@ -187,7 +199,7 @@ def extrair_nf(payload: Payload):
             "Se o texto iniciar direto com o nome de uma empresa (Ex: 'Suprisul Materiais para Escritório Ltda'), "
             "este é obrigatoriamente o fornecedor. Não confunda com o cliente listado abaixo.\n"
             
-            "2. **cnpj_cpf_nif**: Extraia o CNPJ que pertence ao fornecedor (geralmente na parte superior). "
+            "2. **cnpj_cpf_nif**: Extraia o CNPJ que pertence ao fornecedor (Geralmente na parte superior). "
             "Caso o CNPJ venha na mesma linha que a inscrição estadual (Ex: 'CNPJ: 05.088.156/0001-90 I.E.: 77.371.923'), "
             "isole e retorne apenas o número do CNPJ limpo e formatado.\n"
             
