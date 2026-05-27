@@ -59,10 +59,20 @@ def extrair_nf(payload: Payload):
             detail="Arquivo descartado: Extensão não permitida (Apenas PDF, XML ou DOCX)."
         )
 
-    # Decodificação do Base64
+    # -------------------------------------------------------------------------
+    # DECODIFICAÇÃO DO BASE64 (Com limpeza de ruídos e caracteres não-ASCII)
+    # -------------------------------------------------------------------------
     try:
-        conteudo_bytes = base64.b64decode(payload.pdf_base64)
+        # 1. Remove espaços, quebras de linha (\n, \r) indesejadas do Power Automate
+        string_base64_limpa = payload.pdf_base64.strip().replace("\n", "").replace("\r", "").strip()
+        
+        # 2. Força a conversão para bytes ASCII legítimos, ignorando caracteres corrompidos
+        bytes_ascii = string_base64_limpa.encode('ascii', errors='ignore')
+        
+        # 3. Faz a decodificação segura do binário
+        conteudo_bytes = base64.b64decode(bytes_ascii)
     except Exception as e:
+        print(f"[ERRO CRÍTICO BASE64] String inválida recebida: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao decodificar Base64: {str(e)}")
 
     # -------------------------------------------------------------------------
@@ -109,7 +119,7 @@ def extrair_nf(payload: Payload):
                 "cnpj_cpf_nif": cnpj.text if cnpj is not None else "Não encontrado",
                 "numero_nf": numero_nf.text if numero_nf is not None else "Não encontrado",
                 "data_emissao": data.text if data is not None else "Não encontrado",
-                "mes_extenso": mes_extenso,  # Campo adicionado para o XML
+                "mes_extenso": mes_extenso,
                 "valor_total": valor.text if valor is not None else "0.00"
             }
             print(f"[SUCESSO LOCAL] XML extraído com sucesso: {resultado_xml}")
@@ -183,7 +193,7 @@ def extrair_nf(payload: Payload):
                         "cnpj_cpf_nif": types.Schema(type=types.Type.STRING),
                         "numero_nf": types.Schema(type=types.Type.STRING),
                         "data_emissao": types.Schema(type=types.Type.STRING),
-                        "mes_extenso": types.Schema(type=types.Type.STRING),  # Campo mapeado no schema do Gemini
+                        "mes_extenso": types.Schema(type=types.Type.STRING),
                         "valor_total": types.Schema(type=types.Type.STRING),
                     },
                     required=["tipo_documento", "fornecedor", "cnpj_cpf_nif", "numero_nf", "data_emissao", "mes_extenso", "valor_total"],
