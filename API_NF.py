@@ -85,18 +85,19 @@ def health_check():
 
 @app.post("/extrair-nf")
 def extrair_nf(payload: Payload):
-    nome_arq = payload.nome_arquivo.lower()
+    # CORREÇÃO CRÍTICA: Trata espaços em branco nas pontas e joga toda a string para minúsculo
+    nome_arq = payload.nome_arquivo.strip().lower()
     print(f"=== [API] Nova requisição: Arquivo [{payload.nome_arquivo}] ===")
     
     # -------------------------------------------------------------------------
-    # FILTRO 1: VALIDAÇÃO DE EXTENSÃO
+    # FILTRO 1: VALIDAÇÃO DE EXTENSÃO (Otimizada com Expressão Regular)
     # -------------------------------------------------------------------------
-    extensoes_permitidas = (".pdf", ".xml", ".docx")
-    if not nome_arq.endswith(extensoes_permitidas):
-        print(f"[TRIAGEM] Arquivo descartado por extensão inválida: {payload.nome_arquivo}")
+    # O padrão r'\.(pdf|xml|docx)$' valida de forma resiliente o final real do arquivo
+    if not re.search(r'\.(pdf|xml|docx)$', nome_arq):
+        print(f"[TRIAGEM] Arquivo descartado por extensão inválida após tratamento: {nome_arq}")
         raise HTTPException(
             status_code=422, 
-            detail="Arquivo descartado: Extensão não permitida (Apenas PDF, XML ou DOCX)."
+            detail=f"Arquivo descartado: Extensão não permitida. Recebido: '{payload.nome_arquivo}'. Use apenas PDF, XML ou DOCX."
         )
 
     # -------------------------------------------------------------------------
@@ -175,7 +176,7 @@ def extrair_nf(payload: Payload):
     # -------------------------------------------------------------------------
     texto_extraido = ""
     
-    if nome_arq.endswith(".docx"):
+    if ".docx" in nome_arq:
         print("[PROCESSAMENTO] Extraindo texto de documento Word (.docx)...")
         try:
             doc = Document(io.BytesIO(conteudo_bytes))
@@ -192,7 +193,7 @@ def extrair_nf(payload: Payload):
         except Exception as e:
             raise HTTPException(status_code=422, detail=f"Erro ao ler arquivo Word: {str(e)}")
 
-    elif nome_arq.endswith(".pdf"):
+    elif ".pdf" in nome_arq:
         print("[PROCESSAMENTO] Extraindo texto de arquivo PDF...")
         try:
             leitor = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
@@ -207,7 +208,6 @@ def extrair_nf(payload: Payload):
     texto_analise = texto_extraido.lower()
     matches = [termo for termo in PALAVRAS_CHAVE_VALIDACAO if termo in texto_analise]
     
-    # Reduzido para exigir pelo menos 1 match claro, evitando falsos negativos com boletos limpos
     if len(matches) < 1:
         print(f"[TRIAGEM] Arquivo textual rejeitado por falta de contexto fiscal/bancário ({len(matches)} termos encontrados).")
         raise HTTPException(
@@ -230,7 +230,7 @@ def extrair_nf(payload: Payload):
             "1. **tipo_documento**: Defina rigidamente se o documento é uma 'Nota Fiscal', 'Fatura' ou 'Boleto'.\n\n"
             
             "2. **fornecedor**: Identifique a empresa EMISSORA, PRESTADORA ou BENEFICIÁRIA/CEDENTE da cobrança.\n"
-            "   - REGRA DE EXCLUSÃO MANDATÓRIA: A empresa 'BIOCHIMICO' (ou 'INSTITUTO BIOCHIMICO') é estritamente o CLIENTE/TOMADOR/PAGADOR. Portanto, NUNCA capture 'BIOCHIMICO' neste campo.\n"
+            "   - REGRA DE EXCLUSÃO MANDATÓRIA: A empresa 'BIOCHIMICO' (or 'INSTITUTO BIOCHIMICO') é estritamente o CLIENTE/TOMADOR/PAGADOR. Portanto, NUNCA capture 'BIOCHIMICO' neste campo.\n"
             "   - O fornecedor real será a OUTRA empresa que aparece no texto (geralmente associada a termos como 'Emitente', 'Prestador', 'Beneficiário', 'Cedente' ou listada no topo do documento).\n"
             "   - Caso venha em formato de tabela misturado, separe e traga apenas o nome da empresa parceira.\n\n"
             
@@ -238,7 +238,7 @@ def extrair_nf(payload: Payload):
             "   - REGRA DE EXCLUSÃO MANDATÓRIA: O CNPJ '33.258.401/0004-48' pertence à Biochimico. NUNCA retorne este número aqui.\n"
             "   - Localize o outro CNPJ ou CPF presente no documento correspondente à empresa emissora da cobrança e retorne-o formatado.\n\n"
             
-            "4. **numero_nf**: Encontre o número do documento fiscal, número da fatura ou o 'Número do Documento' / 'Nosso Número' se for um boleto. "
+            "4. **numero_nf**: Encontre o número do documento fiscal, número da faturamento ou o 'Número do Documento' / 'Nosso Número' se for um boleto. "
             "Se o número constar no nome do arquivo (ex: '602261'), certifique-se de validar se ele bate com o sequencial encontrado no texto.\n\n"
             
             "5. **data_emissao**: Capture a data de emissão ou data do documento expressa no texto. Caso o documento seja um boleto e não declare explicitamente a data de emissão, use a data de vencimento disponível. "
@@ -257,7 +257,6 @@ def extrair_nf(payload: Payload):
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                # Mantido o Schema original para integridade perfeita com seu Power Automate
                 response_schema=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
@@ -278,7 +277,7 @@ def extrair_nf(payload: Payload):
         resultado_ia = json.loads(texto_resposta)
 
         # -------------------------------------------------------------------------
-        # CAMADA PÓS-PROCESSAMENTO: APLICAÇÃO DOS FALLBREAKS
+        # CAMADA PÓS-PROCESSAMENTO: APLICAÇÃO DOS FALLBACKS
         # -------------------------------------------------------------------------
         if not resultado_ia.get("cnpj_cpf_nif") or resultado_ia.get("cnpj_cpf_nif").strip() in ["", "Não encontrado", "Não Informado"]:
             cnpj_encontrado = buscar_cnpj_fallback(texto_extraido)
