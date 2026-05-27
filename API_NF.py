@@ -23,6 +23,13 @@ PALAVRAS_CHAVE_VALIDACAO = [
     "duplicata", "comprovante de cobrança", "cobrança", "recibo"
 ]
 
+# Dicionário auxiliar para mapear e traduzir o mês numérico do XML para extenso
+MESES_MAP = {
+    "01": "Janeiro", "02": "Fevereiro", "03": "Março", "04": "Abril",
+    "05": "Maio", "06": "Junho", "07": "Julho", "08": "Agosto",
+    "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro"
+}
+
 class Payload(BaseModel):
     nome_arquivo: str
     pdf_base64: str
@@ -84,12 +91,25 @@ def extrair_nf(payload: Payload):
             valor = raiz.find('.//vNF') or raiz.find('.//valores/valorLiquido') or raiz.find('.//vProd')
             data = raiz.find('.//dhEmi') or raiz.find('.//dataEmissao') or raiz.find('.//dEmi')
 
+            # Descobre o mês por extenso analisando nativamente a tag de data do XML
+            mes_extenso = "Mês Não Identificado"
+            if data is not None and data.text:
+                if '-' in data.text:  # Formato padrão ISO: AAAA-MM-DD
+                    partes_data = data.text.split('-')
+                    if len(partes_data) >= 2 and partes_data[1] in MESES_MAP:
+                        mes_extenso = MESES_MAP[partes_data[1]]
+                elif '/' in data.text:  # Formato alternativo: DD/MM/AAAA
+                    partes_barra = data.text.split('/')
+                    if len(partes_barra) >= 2 and partes_barra[1] in MESES_MAP:
+                        mes_extenso = MESES_MAP[partes_barra[1]]
+
             resultado_xml = {
                 "tipo_documento": "Nota Fiscal",
                 "fornecedor": emitente.text if emitente is not None else "Não encontrado",
                 "cnpj_cpf_nif": cnpj.text if cnpj is not None else "Não encontrado",
                 "numero_nf": numero_nf.text if numero_nf is not None else "Não encontrado",
                 "data_emissao": data.text if data is not None else "Não encontrado",
+                "mes_extenso": mes_extenso,  # Campo adicionado para o XML
                 "valor_total": valor.text if valor is not None else "0.00"
             }
             print(f"[SUCESSO LOCAL] XML extraído com sucesso: {resultado_xml}")
@@ -138,13 +158,15 @@ def extrair_nf(payload: Payload):
         )
 
     # -------------------------------------------------------------------------
-    # CHAMADA INTELIGENTE DO GEMINI (Controle de Cota 429 + Novos Campos)
+    # CHAMADA INTELIGENTE DO GEMINI (Controle de Cota 429 + Novos Campos com mes_extenso)
     # -------------------------------------------------------------------------
     try:
         print("[GEMINI] Documento validado! Enviando texto para estruturação...")
         prompt = (
             "Analise textualmente o documento fornecido. Classifique-o entre 'Nota Fiscal' ou 'Fatura' "
             "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n"
+            "Na propriedade 'mes_extenso', verifique a data de emissão encontrada no texto e escreva por extenso apenas o nome "
+            "do mês correspondente em português, iniciando com letra maiúscula (exemplo: Janeiro, Fevereiro, Março, Abril, Maio, etc).\n"
             f"Texto do documento:\n{texto_extraido}"
         )
 
@@ -161,19 +183,19 @@ def extrair_nf(payload: Payload):
                         "cnpj_cpf_nif": types.Schema(type=types.Type.STRING),
                         "numero_nf": types.Schema(type=types.Type.STRING),
                         "data_emissao": types.Schema(type=types.Type.STRING),
+                        "mes_extenso": types.Schema(type=types.Type.STRING),  # Campo mapeado no schema do Gemini
                         "valor_total": types.Schema(type=types.Type.STRING),
                     },
-                    required=["tipo_documento", "fornecedor", "cnpj_cpf_nif", "numero_nf", "data_emissao", "valor_total"],
+                    required=["tipo_documento", "fornecedor", "cnpj_cpf_nif", "numero_nf", "data_emissao", "mes_extenso", "valor_total"],
                 ),
             ),
         )
         
         resultado_ia = json.loads(response.text.strip())
-        print(f"[GEMINI] Sucesso no mapeamento: {resultado_ia['fornecedor']} | {resultado_ia['tipo_documento']}")
+        print(f"[GEMINI] Sucesso no mapeamento: {resultado_ia['fornecedor']} | Mês: {resultado_ia['mes_extenso']} | {resultado_ia['tipo_documento']}")
         return resultado_ia
 
     except APIError as api_err:
-        # Captura estouro de limite por minuto (Erro 429) e avisa o Power Automate para retentar
         if api_err.code == 429:
             print("[ALERTA COTA] Limite de requisições por minuto atingido no Gemini.")
             raise HTTPException(status_code=429, detail="Limite de requisições do Gemini atingido. Tente novamente em breve.")
