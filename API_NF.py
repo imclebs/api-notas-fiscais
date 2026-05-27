@@ -172,16 +172,38 @@ def extrair_nf(payload: Payload):
         )
 
     # -------------------------------------------------------------------------
-    # CHAMADA GEMINI
+    # CHAMADA GEMINI (Prompt Turbinado com Regras de Mapeamento)
     # -------------------------------------------------------------------------
     try:
-        print("[GEMINI] Documento validado! Enviando texto para estruturação...")
+        print("[GEMINI] Documento validado! Enviando texto para estruturação avançada...")
+        
         prompt = (
+            "Atue como um analista fiscal especialista em extração de dados de documentos brasileiros.\n"
             "Analise textualmente o documento fornecido. Classifique-o entre 'Nota Fiscal' ou 'Fatura' "
-            "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n"
-            "Na propriedade 'mes_extenso', verifique a data de emissão encontrada no texto e escreva por extenso apenas o nome "
-            "do mês correspondente em português, iniciando com letra maiúscula (exemplo: Janeiro, Fevereiro, Março, Abril, Maio, etc).\n"
-            f"Texto do documento:\n{texto_extraido}"
+            "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n\n"
+            
+            "DIRETRIZES CRÍTICAS PARA GARANTIR A CAPTURA:\n"
+            "1. **fornecedor**: É a empresa emissora/prestadora localizada no topo absoluto do documento. "
+            "Se o texto iniciar direto com o nome de uma empresa (Ex: 'Suprisul Materiais para Escritório Ltda'), "
+            "este é obrigatoriamente o fornecedor. Não confunda com o cliente listado abaixo.\n"
+            
+            "2. **cnpj_cpf_nif**: Extraia o CNPJ que pertence ao fornecedor (geralmente na parte superior). "
+            "Caso o CNPJ venha na mesma linha que a inscrição estadual (Ex: 'CNPJ: 05.088.156/0001-90 I.E.: 77.371.923'), "
+            "isole e retorne apenas o número do CNPJ limpo e formatado.\n"
+            
+            "3. **numero_nf**: Encontre o número de identificação do documento fiscal ou da fatura de locação. "
+            "Se estiver no formato 'N°6748/26', extraia o número sequencial antes da barra ('6748').\n"
+            
+            "4. **data_emissao**: Capture a data de emissão expressa no texto. Caso o ano venha abreviado com dois dígitos "
+            "(Ex: '07/05/26'), converta automaticamente para o formato de 4 dígitos ('07/05/2026').\n"
+            
+            "5. **mes_extenso**: Baseado exclusivamente na data de emissão que você localizou, determine o mês e escreva por "
+            "extenso em português, com a inicial em maiúscula (Ex: 'Maio').\n"
+            
+            "6. **valor_total**: Localize o valor monetário final do documento com base na palavra-chave 'TOTAL' ou 'TOTAL DA FATURA'. "
+            "Retorne apenas os caracteres numéricos e a vírgula/ponto do valor decimal (Ex: '1990,00').\n\n"
+            
+            f"Texto do documento para análise:\n{texto_extraido}"
         )
 
         response = client.models.generate_content(
@@ -189,6 +211,7 @@ def extrair_nf(payload: Payload):
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
+                # Mantido o Schema original idêntico para não alterar seu Power Automate
                 response_schema=types.Schema(
                     type=types.Type.OBJECT,
                     properties={
