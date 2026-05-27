@@ -184,7 +184,7 @@ def extrair_nf(payload: Payload):
         )
 
     # -------------------------------------------------------------------------
-    # CHAMADA GEMINI (Prompt Turbinado com Regras de Mapeamento)
+    # CHAMADA GEMINI (Prompt Turbinado com Captura de Erro Estruturado)
     # -------------------------------------------------------------------------
     try:
         print("[GEMINI] Documento validado! Enviando texto para estruturação avançada...")
@@ -195,24 +195,26 @@ def extrair_nf(payload: Payload):
             "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n\n"
             
             "DIRETRIZES CRÍTICAS PARA GARANTIR A CAPTURA:\n"
-            "1. **fornecedor**: É a empresa emissora/prestadora localizada no topo absoluto do documento. "
-            "Se o texto iniciar direto com o nome de uma empresa (Ex: 'Suprisul Materiais para Escritório Ltda'), "
-            "este é obrigatoriamente o fornecedor. Não confunda com o cliente listado abaixo.\n"
+            "1. **fornecedor**: Identifique a empresa EMISSORA/PRESTADORA do serviço ou venda. "
+            "Geralmente está no topo absoluto ou associada a palavras como 'Emitente', 'Prestador' ou 'Razão Social'. "
+            "Atenção: Se o texto extraído de tabelas misturar o nome do emissor com o do cliente na mesma linha "
+            "(Ex: 'Suprisul | Biochimico'), isole o nome do EMISSOR/FORNECEDOR (neste caso, 'Suprisul'). "
+            "NUNCA responda com 'Não Informado' se houver o nome de uma empresa prestadora evidente no texto.\n"
             
             "2. **cnpj_cpf_nif**: Extraia o CNPJ que pertence ao fornecedor (Geralmente na parte superior). "
             "Caso o CNPJ venha na mesma linha que a inscrição estadual (Ex: 'CNPJ: 05.088.156/0001-90 I.E.: 77.371.923'), "
             "isole e retorne apenas o número do CNPJ limpo e formatado.\n"
             
             "3. **numero_nf**: Encontre o número de identificação do documento fiscal ou da fatura de locação. "
-            "Se estiver no formato 'N°6748/26', extraia o número sequencial antes da barra ('6748').\n"
+            "Se estiver no formato 'N°6748/26' ou no próprio nome do arquivo como 'REC6748', extraia o número sequencial correspondente ('6748').\n"
             
             "4. **data_emissao**: Capture a data de emissão expressa no texto. Caso o ano venha abreviado com dois dígitos "
-            "(Ex: '07/05/26'), converta automaticamente para o formato de 4 dígitos ('07/05/2026').\n"
+            "(Ex: '07/05/26' ou apenas indicado pelo período '0526'), converta automaticamente para o formato padrão ou infira o ano com 4 dígitos ('05/2026' ou '01/05/2026').\n"
             
             "5. **mes_extenso**: Baseado exclusivamente na data de emissão que você localizou, determine o mês e escreva por "
             "extenso em português, com a inicial em maiúscula (Ex: 'Maio').\n"
             
-            "6. **valor_total**: Localize o valor monetário final do documento com base na palavra-chave 'TOTAL' ou 'TOTAL DA FATURA'. "
+            "6. **valor_total**: Localize o valor monetário final do documento com base na palavra-chave 'TOTAL', 'VALOR' ou 'TOTAL DA FATURA'. "
             "Retorne apenas os caracteres numéricos e a vírgula/ponto do valor decimal (Ex: '1990,00').\n\n"
             
             f"Texto do documento para análise:\n{texto_extraido}"
@@ -240,15 +242,24 @@ def extrair_nf(payload: Payload):
             ),
         )
         
-        resultado_ia = json.loads(response.text.strip())
-        print(f"[GEMINI] Sucesso no mapeamento: {resultado_ia['fornecedor']} | Mês: {resultado_ia['mes_extenso']} | {resultado_ia['tipo_documento']}")
+        # Log preventivo para ver o que a IA retornou antes de tratar no JSON
+        texto_resposta = response.text.strip() if response.text else "RESPOSTA_VAZIA"
+        
+        resultado_ia = json.loads(texto_resposta)
+        print(f"[GEMINI] Sucesso no mapeamento: {resultado_ia.get('fornecedor', 'N/A')} | Mês: {resultado_ia.get('mes_extenso', 'N/A')} | {resultado_ia.get('tipo_documento', 'N/A')}")
         return resultado_ia
 
     except APIError as api_err:
         if api_err.code == 429:
             print("[ALERTA COTA] Limite de requisições por minuto atingido no Gemini.")
             raise HTTPException(status_code=429, detail="Limite de requisições do Gemini atingido. Tente novamente em breve.")
+        print(f"[ERRO API GOOGLE] Detalhes: {str(api_err)}")
         raise HTTPException(status_code=500, detail=f"Erro na API do Google: {str(api_err)}")
+    except json.JSONDecodeError as json_err:
+        print(f"[ERRO JSON PARSE] O Gemini não retornou um JSON válido. Resposta bruta da IA:\n{texto_resposta}")
+        raise HTTPException(status_code=500, detail="Erro interno: A IA não retornou um formato estruturado válido.")
     except Exception as e:
-        print(f"[ERRO PARSE] Falha geral: {str(e)}")
+        print(f"[ERRO GERAL NA CHAMADA IA] Falha: {str(e)}")
+        if 'texto_resposta' in locals():
+            print(f"[CONTEÚDO BRUTO DA IA NO MOMENTO DO ERRO]: {texto_resposta}")
         raise HTTPException(status_code=500, detail=f"Erro no processamento da IA: {str(e)}")
