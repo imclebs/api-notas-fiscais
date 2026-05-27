@@ -2,101 +2,182 @@ import os
 import io
 import json
 import base64
+import xml.etree.ElementTree as ET
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import pypdf
+from docx import Document
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 
-# Inicializa a aplicação FastAPI
-app = FastAPI(title="API Extração de Notas Fiscais - Gemini 2.5 Flash")
+app = FastAPI(title="API Inteligente de Triagem e Extração de Notas/Faturas - Gemini 2.5")
 
-# Inicializa o cliente do Gemini buscando a chave do Render
+# Inicializa o cliente do Gemini
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
+# Palavras-chave para validar se o documento textual é um documento fiscal ou cobrança legítima
+PALAVRAS_CHAVE_VALIDACAO = [
+    "nota fiscal", "nf-e", "nfe", "danfe", "nfse", "prestador", "tomador", 
+    "faturamento", "emissão", "valor recebido", "fatura", "invoice", 
+    "duplicata", "comprovante de cobrança", "cobrança", "recibo"
+]
+
 class Payload(BaseModel):
+    nome_arquivo: str
     pdf_base64: str
 
 @app.get("/")
 def health_check():
-    """Rota raiz para o Render validar que o serviço está online"""
     chave_existe = "SIM" if os.environ.get("GEMINI_API_KEY") else "NÃO"
     return {
         "status": "online", 
-        "servico": "API Extração de Notas Fiscais (Gemini)",
+        "servico": "API Triagem e Extração Avançada Ativa",
         "chave_configurada": chave_existe
     }
 
 @app.post("/extrair-nf")
 def extrair_nf(payload: Payload):
-    print("=== [API] Nova requisição recebida no endpoint /extrair-nf ===")
+    nome_arq = payload.nome_arquivo.lower()
+    print(f"=== [API] Nova requisição: Arquivo [{payload.nome_arquivo}] ===")
+    
+    # -------------------------------------------------------------------------
+    # FILTRO 1: VALIDAÇÃO DE EXTENSÃO
+    # -------------------------------------------------------------------------
+    extensoes_permitidas = (".pdf", ".xml", ".docx")
+    if not nome_arq.endswith(extensoes_permitidas):
+        print(f"[TRIAGEM] Arquivo descartado por extensão inválida: {payload.nome_arquivo}")
+        raise HTTPException(
+            status_code=422, 
+            detail="Arquivo descartado: Extensão não permitida (Apenas PDF, XML ou DOCX)."
+        )
+
+    # Decodificação do Base64
     try:
-        # 1. DECODIFICAÇÃO DO BASE64
+        conteudo_bytes = base64.b64decode(payload.pdf_base64)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao decodificar Base64: {str(e)}")
+
+    # -------------------------------------------------------------------------
+    # FLUXO AUTOMÁTICO: PROCESSAMENTO DE XML (Custo Zero de IA - Processamento Local)
+    # -------------------------------------------------------------------------
+    if nome_arq.endswith(".xml"):
+        print("[PROCESSAMENTO] Identificado arquivo XML. Processando nativamente...")
         try:
-            print("[ETAPA 1] Decodificando a string Base64...")
-            pdf_bytes = base64.b64decode(payload.pdf_base64)
-            print(f"[ETAPA 1] Sucesso! Tamanho do arquivo: {len(pdf_bytes)} bytes.")
-        except Exception as e:
-            print(f"[ERRO ETAPA 1] Falha na decodificação Base64: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"Erro Base64: {str(e)}")
+            string_xml = conteudo_bytes.decode('utf-8', errors='ignore').strip()
+            raiz = ET.fromstring(string_xml)
             
-        # 2. EXTRAÇÃO DE TEXTO DO PDF (Usando pypdf de forma leve)
-        texto = ""
+            # Remove namespaces para facilitar o mapeamento das tags
+            for elem in raiz.iter():
+                if '}' in elem.tag:
+                    elem.tag = elem.tag.split('}', 1)[1]
+            
+            # Validação se é uma estrutura de nota válida
+            if raiz.find('.//infNfe') is None and raiz.find('.//infNFSe') is None and 'nfe' not in raiz.tag.lower():
+                print(f"[TRIAGEM] XML rejeitado. Não possui estrutura fiscal: {payload.nome_arquivo}")
+                raise HTTPException(status_code=422, detail="Arquivo descartado: O XML enviado não é um documento fiscal válido.")
+
+            # Extração de campos estruturados do XML
+            numero_nf = raiz.find('.//ide/nNF') or raiz.find('.//numero')
+            emitente = raiz.find('.//emit/xNome') or raiz.find('.//prestadorServico/razaoSocial') or raiz.find('.//emit/xFant')
+            cnpj = raiz.find('.//emit/CNPJ') or raiz.find('.//emit/CPF') or raiz.find('.//prestadorServico/identificacaoPrestador/cnpj')
+            valor = raiz.find('.//vNF') or raiz.find('.//valores/valorLiquido') or raiz.find('.//vProd')
+            data = raiz.find('.//dhEmi') or raiz.find('.//dataEmissao') or raiz.find('.//dEmi')
+
+            resultado_xml = {
+                "tipo_documento": "Nota Fiscal",
+                "fornecedor": emitente.text if emitente is not None else "Não encontrado",
+                "cnpj_cpf_nif": cnpj.text if cnpj is not None else "Não encontrado",
+                "numero_nf": numero_nf.text if numero_nf is not None else "Não encontrado",
+                "data_emissao": data.text if data is not None else "Não encontrado",
+                "valor_total": valor.text if valor is not None else "0.00"
+            }
+            print(f"[SUCESSO LOCAL] XML extraído com sucesso: {resultado_xml}")
+            return resultado_xml
+
+        except HTTPException as http_err:
+            raise http_err
+        except Exception as e:
+            print(f"[ERRO XML] Falha no parse do XML: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Falha ao ler a estrutura do arquivo XML: {str(e)}")
+
+    # -------------------------------------------------------------------------
+    # FLUXO TEXTUAL: EXTRAÇÃO DE TEXTO PARA DOCX OU PDF
+    # -------------------------------------------------------------------------
+    texto_extraido = ""
+    
+    if nome_arq.endswith(".docx"):
+        print("[PROCESSAMENTO] Extraindo texto de documento Word (.docx)...")
         try:
-            print("[ETAPA 2] Extraindo texto com pypdf...")
-            feixe_bytes = io.BytesIO(pdf_bytes)
-            leitor = pypdf.PdfReader(feixe_bytes)
+            doc = Document(io.BytesIO(conteudo_bytes))
+            for paragrafo in doc.paragraphs:
+                texto_extraido += paragrafo.text + "\n"
+        except Exception as e:
+            raise HTTPException(status_code=422, detail=f"Erro ao ler arquivo Word: {str(e)}")
+
+    elif nome_arq.endswith(".pdf"):
+        print("[PROCESSAMENTO] Extraindo texto de arquivo PDF...")
+        try:
+            leitor = pypdf.PdfReader(io.BytesIO(conteudo_bytes))
             for pagina in leitor.pages:
-                texto += pagina.extract_text() or ""
-            print(f"[ETAPA 2] Sucesso! Caracteres extraídos: {len(texto)}")
+                texto_extraido += pagina.extract_text() or ""
         except Exception as e:
-            print(f"[ERRO ETAPA 2] Falha ao ler PDF com pypdf: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Erro ao ler PDF: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Erro ao ler arquivo PDF: {str(e)}")
 
-        if not texto.strip():
-            print("[ERRO ETAPA 2] O texto extraído está totalmente vazio.")
-            raise HTTPException(status_code=422, detail="O PDF está vazio ou é uma imagem escaneada.")
+    # -------------------------------------------------------------------------
+    # FILTRO 2: VALIDAÇÃO TEXTUAL (Filtra assinaturas, ícones e arquivos aleatórios)
+    # -------------------------------------------------------------------------
+    texto_analise = texto_extraido.lower()
+    matches = [termo for termo in PALAVRAS_CHAVE_VALIDACAO if termo in texto_analise]
+    
+    if len(matches) < 2:
+        print(f"[TRIAGEM] Arquivo textual rejeitado por falta de contexto fiscal ({len(matches)} termos encontrados).")
+        raise HTTPException(
+            status_code=422, 
+            detail="Arquivo descartado: O conteúdo não condiz com uma Nota Fiscal ou Fatura legítima."
+        )
 
-        # 3. CHAMADA PARA O GEMINI (Modelo atualizado para gemini-2.5-flash)
-        try:
-            print("[ETAPA 3] Enviando texto para a API do Google Gemini (gemini-2.5-flash)...")
-            prompt = f"Extraia as informações estruturadas desta nota fiscal e retorne estritamente um objeto JSON.\\nTexto:\\n{texto}"
+    # -------------------------------------------------------------------------
+    # CHAMADA INTELIGENTE DO GEMINI (Controle de Cota 429 + Novos Campos)
+    # -------------------------------------------------------------------------
+    try:
+        print("[GEMINI] Documento validado! Enviando texto para estruturação...")
+        prompt = (
+            "Analise textualmente o documento fornecido. Classifique-o entre 'Nota Fiscal' ou 'Fatura' "
+            "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n"
+            f"Texto do documento:\n{texto_extraido}"
+        )
 
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "numero_nf": types.Schema(type=types.Type.STRING),
-                            "fornecedor": types.Schema(type=types.Type.STRING),
-                            "valor_total": types.Schema(type=types.Type.STRING),
-                            "data_emissao": types.Schema(type=types.Type.STRING),
-                        },
-                        required=["numero_nf", "fornecedor", "valor_total", "data_emissao"],
-                    ),
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "tipo_documento": types.Schema(type=types.Type.STRING),
+                        "fornecedor": types.Schema(type=types.Type.STRING),
+                        "cnpj_cpf_nif": types.Schema(type=types.Type.STRING),
+                        "numero_nf": types.Schema(type=types.Type.STRING),
+                        "data_emissao": types.Schema(type=types.Type.STRING),
+                        "valor_total": types.Schema(type=types.Type.STRING),
+                    },
+                    required=["tipo_documento", "fornecedor", "cnpj_cpf_nif", "numero_nf", "data_emissao", "valor_total"],
                 ),
-            )
-            print("[ETAPA 3] Sucesso! Gemini respondeu à requisição.")
-        except Exception as e:
-            print(f"[ERRO ETAPA 3] Falha crítica na chamada do Gemini: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Falha na API do Gemini: {str(e)}")
-
-        # 4. CONVERSÃO DO RETORNO
-        try:
-            print("[ETAPA 4] Convertendo a resposta em JSON estruturado...")
-            resultado = json.loads(response.text.strip())
-            print(f"[ETAPA 4] Sucesso! Dados estruturados prontos para o Power Automate.")
-            return resultado
-        except Exception as e:
-            print(f"[ERRO ETAPA 4] Resposta do Gemini não era um JSON válido: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Erro JSON: {str(e)}")
-
-    except HTTPException as http_err:
-        raise http_err
-    except Exception as general_err:
-        print(f"[ERRO INESPERADO] Quebra geral no script Python: {str(general_err)}")
-        raise HTTPException(status_code=500, detail=f"Erro interno inesperado: {str(general_err)}")
+            ),
+        )
         
+        resultado_ia = json.loads(response.text.strip())
+        print(f"[GEMINI] Sucesso no mapeamento: {resultado_ia['fornecedor']} | {resultado_ia['tipo_documento']}")
+        return resultado_ia
+
+    except APIError as api_err:
+        # Captura estouro de limite por minuto (Erro 429) e avisa o Power Automate para retentar
+        if api_err.code == 429:
+            print("[ALERTA COTA] Limite de requisições por minuto atingido no Gemini.")
+            raise HTTPException(status_code=429, detail="Limite de requisições do Gemini atingido. Tente novamente em breve.")
+        raise HTTPException(status_code=500, detail=f"Erro na API do Google: {str(api_err)}")
+    except Exception as e:
+        print(f"[ERRO PARSE] Falha geral: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro no processamento da IA: {str(e)}")
