@@ -195,15 +195,14 @@ def extrair_nf(payload: Payload):
             "e extraia as informações necessárias estruturadas estritamente no formato JSON solicitado.\n\n"
             
             "DIRETRIZES CRÍTICAS PARA GARANTIR A CAPTURA:\n"
-            "1. **fornecedor**: Identifique a empresa EMISSORA/PRESTADORA do serviço ou venda. "
-            "Geralmente está no topo absoluto ou associada a palavras como 'Emitente', 'Prestador' ou 'Razão Social'. "
-            "Atenção: Se o texto extraído de tabelas misturar o nome do emissor com o do cliente na mesma linha "
-            "(Ex: 'Suprisul | Biochimico'), isole o nome do EMISSOR/FORNECEDOR (neste caso, 'Suprisul'). "
-            "NUNCA responda com 'Não Informado' se houver o nome de uma empresa prestadora evidente no texto.\n"
+            "1. **fornecedor**: Identifique a empresa EMISSORA/PRESTADORA do serviço ou venda.\n"
+            "   - REGRA DE EXCLUSÃO MANDATÓRIA: A empresa 'BIOCHIMICO' é o CLIENTE/TOMADOR desta operação. Portanto, NUNCA capture 'BIOCHIMICO' ou 'BIOCHIMICO MEDICAMENTOS' neste campo.\n"
+            "   - O fornecedor real será a OUTRA empresa que aparece no texto (frequentemente associada a termos como 'Emitente', 'Prestador' ou listada no topo do layout).\n"
+            "   - Caso os nomes venham concatenados da tabela (Ex: 'EmpresaX | Biochimico'), filtre e retorne apenas o nome da 'EmpresaX'. Não responda com 'Não Informado'.\n\n"
             
-            "2. **cnpj_cpf_nif**: Extraia o CNPJ que pertence ao fornecedor (Geralmente na parte superior). "
-            "Caso o CNPJ venha na mesma linha que a inscrição estadual (Ex: 'CNPJ: 05.088.156/0001-90 I.E.: 77.371.923'), "
-            "isole e retorne apenas o número do CNPJ limpo e formatado.\n"
+            "2. **cnpj_cpf_nif**: Extraia o CNPJ pertencente ao fornecedor identificado no item 1.\n"
+            "   - REGRA DE EXCLUSÃO MANDATÓRIA: O CNPJ '33.258.401/0004-48' pertence à Biochimico (Tomador). NUNCA retorne este número aqui.\n"
+            "   - Localize o outro CNPJ presente no documento correspondente à empresa emissora e retorne-o limpo e devidamente formatado.\n\n"
             
             "3. **numero_nf**: Encontre o número de identificação do documento fiscal ou da fatura de locação. "
             "Se estiver no formato 'N°6748/26' ou no próprio nome do arquivo como 'REC6748', extraia o número sequencial correspondente ('6748').\n"
