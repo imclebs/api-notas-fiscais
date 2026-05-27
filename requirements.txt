@@ -3,3 +3,4 @@ uvicorn
 pypdf
 google-genai
 python-multipart
+python-docx
