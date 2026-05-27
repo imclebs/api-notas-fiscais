@@ -5,6 +5,7 @@ import base64
 import xml.etree.ElementTree as ET
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from typing import Any  # <-- Importado para dar flexibilidade ao payload
 import pypdf
 from docx import Document
 from google import genai
@@ -16,23 +17,22 @@ app = FastAPI(title="API Inteligente de Triagem e Extração de Notas/Faturas - 
 # Inicializa o cliente do Gemini
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-# Palavras-chave para validar se o documento textual é um documento fiscal ou cobrança legítima
 PALAVRAS_CHAVE_VALIDACAO = [
     "nota fiscal", "nf-e", "nfe", "danfe", "nfse", "prestador", "tomador", 
     "faturamento", "emissão", "valor recebido", "fatura", "invoice", 
     "duplicata", "comprovante de cobrança", "cobrança", "recibo"
 ]
 
-# Dicionário auxiliar para mapear e traduzir o mês numérico do XML para extenso
 MESES_MAP = {
     "01": "Janeiro", "02": "Fevereiro", "03": "Março", "04": "Abril",
     "05": "Maio", "06": "Junho", "07": "Julho", "08": "Agosto",
     "09": "Setembro", "10": "Outubro", "11": "Novembro", "12": "Dezembro"
 }
 
+# --- AJUSTE NO PYDANTIC ---
 class Payload(BaseModel):
     nome_arquivo: str
-    pdf_base64: str
+    pdf_base64: Any  # Mudamos para Any para aceitar se o Power Automate mandar como objeto ou string pura
 
 @app.get("/")
 def health_check():
@@ -60,23 +60,31 @@ def extrair_nf(payload: Payload):
         )
 
     # -------------------------------------------------------------------------
-    # DECODIFICAÇÃO DO BASE64 (Com limpeza de ruídos e caracteres não-ASCII)
+    # DECODIFICAÇÃO DO BASE64 COM TRATAMENTO PARA POWER AUTOMATE
     # -------------------------------------------------------------------------
     try:
-        # 1. Remove espaços, quebras de linha (\n, \r) indesejadas do Power Automate
-        string_base64_limpa = payload.pdf_base64.strip().replace("\n", "").replace("\r", "").strip()
+        raw_base64 = payload.pdf_base64
         
-        # 2. Força a conversão para bytes ASCII legítimos, ignorando caracteres corrompidos
+        # Se o Power Automate enviar como objeto estruturado, extraímos o $content
+        if isinstance(raw_base64, dict):
+            if "$content" in raw_base64:
+                raw_base64 = raw_base64["$content"]
+            elif "contentBytes" in raw_base64:
+                raw_base64 = raw_base64["contentBytes"]
+        
+        # Garante que temos uma string para limpar
+        string_base64_limpa = str(raw_base64).strip().replace("\n", "").replace("\r", "").strip()
+        
+        # Faz a decodificação segura do binário
         bytes_ascii = string_base64_limpa.encode('ascii', errors='ignore')
-        
-        # 3. Faz a decodificação segura do binário
         conteudo_bytes = base64.b64decode(bytes_ascii)
+        
     except Exception as e:
         print(f"[ERRO CRÍTICO BASE64] String inválida recebida: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Erro ao decodificar Base64: {str(e)}")
 
     # -------------------------------------------------------------------------
-    # FLUXO AUTOMÁTICO: PROCESSAMENTO DE XML (Custo Zero de IA - Processamento Local)
+    # FLUXO AUTOMÁTICO: PROCESSAMENTO DE XML (Custo Zero de IA)
     # -------------------------------------------------------------------------
     if nome_arq.endswith(".xml"):
         print("[PROCESSAMENTO] Identificado arquivo XML. Processando nativamente...")
@@ -84,31 +92,27 @@ def extrair_nf(payload: Payload):
             string_xml = conteudo_bytes.decode('utf-8', errors='ignore').strip()
             raiz = ET.fromstring(string_xml)
             
-            # Remove namespaces para facilitar o mapeamento das tags
             for elem in raiz.iter():
                 if '}' in elem.tag:
                     elem.tag = elem.tag.split('}', 1)[1]
             
-            # Validação se é uma estrutura de nota válida
             if raiz.find('.//infNfe') is None and raiz.find('.//infNFSe') is None and 'nfe' not in raiz.tag.lower():
                 print(f"[TRIAGEM] XML rejeitado. Não possui estrutura fiscal: {payload.nome_arquivo}")
                 raise HTTPException(status_code=422, detail="Arquivo descartado: O XML enviado não é um documento fiscal válido.")
 
-            # Extração de campos estruturados do XML
             numero_nf = raiz.find('.//ide/nNF') or raiz.find('.//numero')
             emitente = raiz.find('.//emit/xNome') or raiz.find('.//prestadorServico/razaoSocial') or raiz.find('.//emit/xFant')
             cnpj = raiz.find('.//emit/CNPJ') or raiz.find('.//emit/CPF') or raiz.find('.//prestadorServico/identificacaoPrestador/cnpj')
             valor = raiz.find('.//vNF') or raiz.find('.//valores/valorLiquido') or raiz.find('.//vProd')
             data = raiz.find('.//dhEmi') or raiz.find('.//dataEmissao') or raiz.find('.//dEmi')
 
-            # Descobre o mês por extenso analisando nativamente a tag de data do XML
             mes_extenso = "Mês Não Identificado"
             if data is not None and data.text:
-                if '-' in data.text:  # Formato padrão ISO: AAAA-MM-DD
+                if '-' in data.text:
                     partes_data = data.text.split('-')
                     if len(partes_data) >= 2 and partes_data[1] in MESES_MAP:
                         mes_extenso = MESES_MAP[partes_data[1]]
-                elif '/' in data.text:  # Formato alternativo: DD/MM/AAAA
+                elif '/' in data.text:
                     partes_barra = data.text.split('/')
                     if len(partes_barra) >= 2 and partes_barra[1] in MESES_MAP:
                         mes_extenso = MESES_MAP[partes_barra[1]]
@@ -155,7 +159,7 @@ def extrair_nf(payload: Payload):
             raise HTTPException(status_code=422, detail=f"Erro ao ler arquivo PDF: {str(e)}")
 
     # -------------------------------------------------------------------------
-    # FILTRO 2: VALIDAÇÃO TEXTUAL (Filtra assinaturas, ícones e arquivos aleatórios)
+    # FILTRO 2: VALIDAÇÃO TEXTUAL
     # -------------------------------------------------------------------------
     texto_analise = texto_extraido.lower()
     matches = [termo for termo in PALAVRAS_CHAVE_VALIDACAO if termo in texto_analise]
@@ -168,7 +172,7 @@ def extrair_nf(payload: Payload):
         )
 
     # -------------------------------------------------------------------------
-    # CHAMADA INTELIGENTE DO GEMINI (Controle de Cota 429 + Novos Campos com mes_extenso)
+    # CHAMADA GEMINI
     # -------------------------------------------------------------------------
     try:
         print("[GEMINI] Documento validado! Enviando texto para estruturação...")
